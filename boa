@@ -1,0 +1,171 @@
+#!/bin/bash
+: "${BOAPATH:=lib}"
+
+
+boa::help() {
+    cat <<'EOT'
+boa COMMAND
+
+Available commands:
+    enable              Output bash shim to stdout
+    import PKG.MODULE   Output specified module to stdout
+    run FILENAME        Run FILENAME with bash shim applied automatically
+EOT
+}
+
+
+boa::main() {
+    if ! (($#)); then
+        boa::help
+    fi
+
+    local cmd="$1"
+    shift
+
+    # FIXME: ambiguous behaviour when $1 is a readable file, and also a supported command
+    # e.g. touch import && boa import will run the empty 'import' script and do nothing
+    if [[ -r "${cmd}" ]]; then
+        set -- "${cmd}" "$@"
+        cmd="run"
+    fi
+
+    case "${cmd}" in
+        enable|import|run|show)
+            boa::"${cmd}" "$@" ;;
+        *)
+            boa::help
+            exit 1 ;;
+    esac
+}
+
+
+boa::enable() {
+    # The obvious implementation for import would be as a bash function like:
+    # import() {
+    #    local modules="$@"
+    #    source <(boa import "${modules[@]}")
+    # }
+    #
+    # However, the bash 'source FILENAME' statement executes in the calling scope. If the imported module
+    # contains any locally scoped variables, for example 'declare -r CONSTANT_NAME=value' (default scope of 'declare'
+    # is local), the variables would go out of scope as soon as the import() function returned.
+    #
+    # Aliases do not have that problem, but do have the problem you cannot "do" anything with the arguments;
+    # unlike functions the word tokens placed after the alias name are not assigned to $1 or anything.
+    #
+    # After a few failed attempts, I came up with the following. It utilises following behaviours:
+    # 1. If a DEBUG trap exists, it is called *before* each command is executed, and receives special variable
+    #    $BASH_COMMAND which contains the to-be-executed command  as a string. We use this to obtain the arguments
+    #    to the 'import' alias.
+    # 2. From my testing I found that  using `source` from within a DEBUG trap acts weirdly, in particular when
+    #    trying to import a module that itself, contained an import.
+    # 3. My key finding was that when using eval with DEBUG trap, the trap executes once on the full "eval ..." command,
+    #    and then the resulting command of the eval is executed. This allows us to reference a variable in "eval"
+    #    that is undefined until the DEBUG trap sees the eval about to run and stores the alias arguments.
+    # 4. When the eval executes the resulting command, it thus contains the values extracted from the alias invocation.
+    # 5. Final problem was that having the final part of the alias command as 'eval source <(boa import log) log'
+    #    will subtly change the invocation behaviour again. The bash command is actually 'source FILENAME [args...]' and
+    #    supplying args will change the values of $#, $*, "$@" within the scope of the sourced file.
+    #    By adding "#" immediately after the redirected input, eval will parse the remainder of the line as a comment
+    #    and 'import log' will ultimately execute as 'source <(boa import log)'
+    cat <<'EOT'
+BOAPATH=lib
+shopt -s expand_aliases
+
+alias import='__boa_trap="$(trap -p DEBUG)" &&
+    trap '\''__boa_import="${BASH_COMMAND##*-- }" &&
+    if [[ -n "${__boa_trap}" ]]; then eval $__boa_trap; else trap - DEBUG; fi'\'' DEBUG &&
+    eval source <(boa import "${__boa_import}") "#" -- '
+EOT
+}
+
+
+boa::get_function_names() {
+    local path="$1"
+    while read -ra decl; do
+        echo "${decl[2]}"
+    done < <(bash <<EOT
+        # Unset any existing functions
+        while read -ra decl; do
+            unset \${decl[2]}
+        done < <(declare -Fp)
+
+        # We provide a DEBUG trap that blocks execution of script contents
+        # function definitions for whatever reason, do not trigger the debug trap,
+        # perhaps because they cannot fail?
+        __boa_noexec() {
+            local cmd="\${BASH_COMMAND}"
+            if [[ "\${cmd}" == "source '${path}'" ]] || [[ "\${cmd}" == "trap - DEBUG" ]]; then
+                return 0
+            fi
+            return 1
+        }
+        shopt -s extdebug
+        trap __boa_noexec DEBUG
+        source '${path}'
+        trap - DEBUG
+
+        # Remove our trap function and then list all functions
+        unset __boa_noexec
+        declare -Fp
+EOT
+) | sort
+}
+
+
+boa::import_module() {
+    local path module="$1"
+    path="${2:-${BOAPATH}/${module}.bash}"
+
+    if ! [[ -r "${path}" ]]; then
+        cat <<EOT
+set -e
+source '${path}'
+EOT
+        return 1
+    fi
+
+    local functions
+    readarray -t functions < <(boa::get_function_names "${path}")
+    sed -E "${path}" -f <(
+        local func mod
+        for func in "${functions[@]}"; do
+            # If $func already starts with dot, escape it in regex and omit from $mod
+            mod="${module}"
+            if [[ "${func:0:1}" == "." ]]; then
+                func="\\.${func:1}"
+            else
+                mod="${mod}."
+            fi
+
+            # sed does not have non-capturing groups
+            # Its rather hard with regex to determine  when ".foo" is referring to our function vs embedded in
+            # some unrelated piece of text. Current rules:
+            # 1. function name preceded by whitespace, "$(" (as in command substitution) or start-of-line
+            # 2. function name followed by "()" (as in a function definition), whitespace, or end-of-line
+            printf 's/(\\s|\$\(|^)(%s)(\(\)|\s|$)/\\1%s\\2\\3/g\n' "${func}" "${module}"
+        done
+    )
+}
+
+
+boa::import() {
+    for module; do
+        if ! boa::import_module "${module}"; then
+            return 1
+        fi
+    done
+
+}
+
+
+boa::run() {
+    local script="$1"
+    shift
+    BASH_ENV=<(boa::enable) bash "${script}" "$@"
+}
+
+
+if [[ "$0" == "${BASH_SOURCE[0]}" ]]; then
+    boa::main "$@"
+fi
