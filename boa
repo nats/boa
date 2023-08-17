@@ -1,7 +1,6 @@
 #!/bin/bash
 : "${BOAPATH:=lib}"
 
-
 boa::help() {
     cat <<'EOT'
 boa COMMAND
@@ -12,7 +11,6 @@ Available commands:
     run FILENAME        Run FILENAME with bash shim applied automatically
 EOT
 }
-
 
 boa::main() {
     if ! (($#)); then
@@ -30,14 +28,15 @@ boa::main() {
     fi
 
     case "${cmd}" in
-        enable|import|run|show)
-            boa::"${cmd}" "$@" ;;
-        *)
-            boa::help
-            exit 1 ;;
+    enable | import | run)
+        boa::"${cmd}" "$@"
+        ;;
+    *)
+        boa::help
+        exit 1
+        ;;
     esac
 }
-
 
 boa::enable() {
     # The obvious implementation for import would be as a bash function like:
@@ -79,12 +78,12 @@ alias import='__boa_trap="$(trap -p DEBUG)" &&
 EOT
 }
 
-
 boa::get_function_names() {
     local path="$1"
     while read -ra decl; do
         printf "%s\n" "${decl[2]}"
-    done < <(env -i bash <<EOT
+    done < <(
+        env -i bash <<EOT
         # shopt -s extdebug: "If the command run by the DEBUG trap returns a non-zero value, the next command is
         # skipped and not executed" . We use this feature of extdebug to skip execution of all commands in \$path
         shopt -s extdebug
@@ -100,9 +99,8 @@ boa::get_function_names() {
         # Function definitions are not commands and thus not skipped by the trap, so we can now list them all:
         declare -Fp
 EOT
-) | sort
+    ) | sort
 }
-
 
 boa::import_module() {
     local path module="$1"
@@ -139,7 +137,6 @@ EOT
     )
 }
 
-
 boa::import() {
     for module; do
         if ! boa::import_module "${module}"; then
@@ -149,13 +146,11 @@ boa::import() {
 
 }
 
-
 boa::run() {
     local script="$1"
     shift
     BASH_ENV=<(boa::enable) bash "${script}" "$@"
 }
-
 
 if [[ "$0" == "${BASH_SOURCE[0]}" ]]; then
     boa::main "$@"
