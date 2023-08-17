@@ -83,30 +83,21 @@ EOT
 boa::get_function_names() {
     local path="$1"
     while read -ra decl; do
-        echo "${decl[2]}"
-    done < <(bash <<EOT
-        # Unset any existing functions
-        while read -ra decl; do
-            unset \${decl[2]}
-        done < <(declare -Fp)
-
-        # We provide a DEBUG trap that blocks execution of script contents
-        # function definitions for whatever reason, do not trigger the debug trap,
-        # perhaps because they cannot fail?
-        __boa_noexec() {
-            local cmd="\${BASH_COMMAND}"
-            if [[ "\${cmd}" == "source '${path}'" ]] || [[ "\${cmd}" == "trap - DEBUG" ]]; then
-                return 0
-            fi
-            return 1
-        }
+        printf "%s\n" "${decl[2]}"
+    done < <(env -i bash <<EOT
+        # shopt -s extdebug: "If the command run by the DEBUG trap returns a non-zero value, the next command is
+        # skipped and not executed" . We use this feature of extdebug to skip execution of all commands in \$path
         shopt -s extdebug
-        trap __boa_noexec DEBUG
-        source '${path}'
-        trap - DEBUG
 
-        # Remove our trap function and then list all functions
-        unset __boa_noexec
+        # Disable command execution while we pass contents of \$path through Bash interpreter
+        trap '[[ "\${BASH_COMMAND}" == "trap :\ BOA_END_NOEXEC_TRAP DEBUG" ]]' DEBUG
+        $(<"${path}")
+
+        # Re-enable command execution. Rather than 'trap - DEBUG' we match on a specific string
+        # to avoid having command execution enabled if module happens to contain 'trap - DEBUG'.
+        trap :\ BOA_END_NOEXEC_TRAP DEBUG
+
+        # Function definitions are not commands and thus not skipped by the trap, so we can now list them all:
         declare -Fp
 EOT
 ) | sort
