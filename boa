@@ -1,5 +1,6 @@
 #!/bin/bash
 : "${BOAPATH:=lib}"
+: "${BOASEP:=.}"
 
 boa::help() {
     cat <<'EOT'
@@ -103,28 +104,50 @@ EOT
 }
 
 boa::import_module() {
-    local path module="$1"
-    path="${2:-${BOAPATH}/${module}.bash}"
-
-    if ! [[ -r "${path}" ]]; then
-        cat <<EOT
-set -e
-source '${path}'
-EOT
-        return 1
+    # Argument may be of form 'import module' or 'import alias=module'
+    # The former is processed like 'import module=module'
+    local alias_="$1" module="$1"
+    if [[ "${module}" =~ = ]]; then
+        IFS='=' read -r alias_ module <<<"${module}"
     fi
 
+    # Determine potential file locations
+    # FIXME: BOAPATH should be colon separated list of directories to look in
+    local bash_path="$2" sh_path="$2" relative_path="${module//${BOASEP}//}"
+    if [[ -z "${bash_path}" ]]; then
+        bash_path="${BOAPATH}/${relative_path}.bash"
+        sh_path="${BOAPATH}/${relative_path}.sh"
+    fi
+
+    # Prefer using .bash file, but fallback to .sh if it exists
+    local path="${bash_path}"
+    if ! [[ -r "${bash_path}" ]]; then
+        if ! [[ -r "${sh_path}" ]]; then
+            # Requested module does not exist; emit script block that will report standard Bash error
+            cat <<EOT
+set -e
+source '${bash_path}'
+EOT
+            return 1
+        else
+            path="${sh_path}"
+        fi
+    fi
+
+    # Rewrite function names in imported module with requested alias and separator
     local functions
     readarray -t functions < <(boa::get_function_names "${path}")
     sed -E "${path}" -f <(
-        local func mod
+        local func prefix
         for func in "${functions[@]}"; do
-            # If $func already starts with dot, escape it in regex and omit from $mod
-            mod="${module}"
-            if [[ "${func:0:1}" == "." ]]; then
-                func="\\.${func:1}"
-            else
-                mod="${mod}."
+            # We treat leading punctutation in function name as a disambiguation prefix of functions and strings
+            prefix=""
+            if [[ "${func}" =~ ^[[:punct:]]+ ]]; then
+                # period need to be escaped in regex
+                prefix="${BASH_REMATCH[0]}"
+                func="${func:${#prefix}}"
+                # FIXME: what else needs escaping?
+                prefix="${prefix//./\.}"
             fi
 
             # sed does not have non-capturing groups
@@ -132,7 +155,7 @@ EOT
             # some unrelated piece of text. Current rules:
             # 1. function name preceded by whitespace, "$(" (as in command substitution) or start-of-line
             # 2. function name followed by "()" (as in a function definition), whitespace, or end-of-line
-            printf 's/(\\s|\$\(|^)(%s)(\(\)|\s|$)/\\1%s\\2\\3/g\n' "${func}" "${module}"
+            printf 's/(\\s|\$\(|^)(%s)(%s)(\(\)|\s|$)/\\1%s\\3\\4/g\n' "${prefix}" "${func}" "${alias_}${BOASEP}"
         done
     )
 }

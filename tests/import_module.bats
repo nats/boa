@@ -34,3 +34,41 @@ add() {
     run boa::import_module test
     [ "${lines[1]}" = 'echo "$(test.get value)"' ]
 }
+
+@test "alternate disambiguation" {
+    add '@get2() { true; }'
+    run boa::import_module test
+    [ "${lines[1]}" = 'test.get2() { true; }' ]
+}
+
+@test "multibyte disambiguation" {
+    add '.::get2() { true; }'
+    run boa::import_module test
+    [ "${lines[1]}" = 'test.get2() { true; }' ]
+}
+
+@test "alternate separator" {
+    BOASEP=:: run boa::import_module test
+    [ "$output" = 'test::get() { true; }' ]
+}
+
+@test "namespace import" {
+    mkdir "${BOAPATH}/testns"
+    mv "${test_module}" "${BOAPATH}/testns"
+
+    run boa::import_module testns.test
+    [ "$output" = 'testns.test.get() { true; }' ]
+}
+
+@test "alias import" {
+    BOASEP=:: run boa::import_module foobar=test
+    [ "$output" = 'foobar::get() { true; }' ]
+}
+
+@test "alias namespace import" {
+    mkdir "${BOAPATH}/testns"
+    mv "${test_module}" "${BOAPATH}/testns"
+
+    run boa::import_module froz=testns.test
+    [ "$output" = 'froz.get() { true; }' ]
+}
