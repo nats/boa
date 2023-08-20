@@ -1,4 +1,5 @@
-source boa
+load boa
+@import boa
 
 @test "single function" {
     run boa::get_function_names "$BATS_TEST_DIRNAME"/samples/single.bash

@@ -1,6 +1,6 @@
 setup_suite() {
     BOADIR="$( dirname "$(readlink -f "$BATS_TEST_FILENAME")" )/.."
-    PATH="$BOADIR:$PATH"
+    PATH="$BOADIR:$BOADIR/src:$PATH"
     export BOADIR PATH
-    export BOAPATH="$BATS_TEST_DIRNAME/samples"
+    export BOAPATH="$BOADIR/src:$BATS_TEST_DIRNAME/samples"
 }

@@ -1,8 +1,13 @@
-all: check format test
+all: check format build test
 
 check:
-	shellcheck boa
+	shellcheck src/*.bash src/**/*.bash
 format:
-	shfmt --diff --indent 4 boa
+	shfmt --diff --indent 4 src/*.bash src/**/*.bash
+build:
+	BOAPATH=src bash src/boa.bash build boa bin/boa.new
+	shellcheck bin/boa.new
+	mv bin/boa.new bin/boa
+	chmod +x bin/boa
 test:
-	@bats tests/
+	@bats --print-output-on-failure tests/

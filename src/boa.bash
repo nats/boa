@@ -1,21 +1,22 @@
 #!/bin/bash
 : "${BOAPATH:=lib}"
-: "${BOASEP:=.}"
+: "${BOASEP:=::}"
 
-boa::help() {
+.help() {
     cat <<'EOT'
 boa COMMAND
 
 Available commands:
-    enable              Output bash shim to stdout
-    import PKG.MODULE   Output specified module to stdout
-    run FILENAME        Run FILENAME with bash shim applied automatically
+    build PKG.MODULE FILENAME   Write PKG.MODULE as a single-file Bash script to FILENAME
+    enable                      Output bash shim to stdout
+    import PKG.MODULE           Output specified module to stdout
+    run FILENAME                Run FILENAME with bash shim applied automatically
 EOT
 }
 
-boa::main() {
+.main() {
     if ! (($#)); then
-        boa::help
+        .help
     fi
 
     local cmd="$1"
@@ -29,17 +30,55 @@ boa::main() {
     fi
 
     case "${cmd}" in
-    enable | import | run)
-        boa::"${cmd}" "$@"
+    build | enable | import | run)
+        # Handle built or not:
+        if type -t "boa::${cmd}" &>/dev/null; then
+            "boa::${cmd}" "$@"
+        else
+            ".${cmd}" "$@"
+        fi
         ;;
     *)
-        boa::help
+        .help
         exit 1
         ;;
     esac
 }
 
-boa::enable() {
+# boa::build_module PKG.MODULE OUTPUT_FILENAME
+# Approximately the same as running `boa import PKG.MODULE`, but produces
+# a file for distribution.
+.build_module() {
+    local module="$1" output="$2"
+
+    local path
+    if ! path=$(.get_module_path "${module}"); then
+        return 1
+    fi
+
+    if ! echo "" >"${output}"; then
+        return 2
+    fi
+
+    .import_module "${module}" >"${output}"
+}
+
+.build() {
+    local rc
+    .build_module "$1" "$2"
+    rc="$?"
+
+    case "$rc" in
+    0) return ;;
+    1) printf "Could not find module '%s'" "$1" ;;
+    2) printf "Could not write to '%s" "$2" ;;
+    *) printf "Unknown error %s" "$rc" ;;
+    esac
+
+    return $rc
+}
+
+.enable() {
     # The obvious implementation for import would be as a bash function like:
     # import() {
     #    local modules="$@"
@@ -68,19 +107,25 @@ boa::enable() {
     #    supplying args will change the values of $#, $*, "$@" within the scope of the sourced file.
     #    By adding "#" immediately after the redirected input, eval will parse the remainder of the line as a comment
     #    and 'import log' will ultimately execute as 'source <(boa import log)'
-    cat <<'EOT'
-BOAPATH=lib
+    cat <<'EOF'
 shopt -s expand_aliases
 
-alias import='__boa_trap="$(trap -p DEBUG)" &&
+alias @import='__boa_trap="$(trap -p DEBUG)" &&
     trap '\''__boa_import="${BASH_COMMAND##*-- }" &&
     if [[ -n "${__boa_trap}" ]]; then eval $__boa_trap; else trap - DEBUG; fi'\'' DEBUG &&
     eval source <(boa import "${__boa_import}") "#" -- '
-EOT
+EOF
+
+    if [[ "$1" == "main" ]]; then
+        cat <<'EOF'
+trap 'if declare -Fp @main &>/dev/null; then @main "$@"; fi' EXIT
+EOF
+    fi
 }
 
-boa::get_function_names() {
+.get_function_names() {
     local path="$1"
+
     while read -ra decl; do
         printf "%s\n" "${decl[2]}"
     done < <(
@@ -103,7 +148,41 @@ EOT
     ) | sort
 }
 
-boa::import_module() {
+# boa::get_module_path PKG.MODULE
+# Search BOAPATH for specified module. Module path is written to stdout.
+# Returns success when module was found, otherwise false.
+.get_module_path() {
+    local module="$1" path
+
+    # Determine potential file locations
+    local boapaths
+    IFS=: read -ra boapaths <<<"${BOAPATH}"
+
+    local entry bash_path sh_path relative_path="${module//${BOASEP}//}"
+    for entry in "${boapaths[@]}"; do
+        bash_path="${entry}/${relative_path}.bash"
+        sh_path="${entry}/${relative_path}.sh"
+
+        # Prefer using .bash file, but fallback to .sh if it exists
+        if [[ -r "${bash_path}" ]]; then
+            path="${bash_path}"
+            break
+        elif [[ -r "${sh_path}" ]]; then
+            path="${sh_path}"
+            break
+        fi
+    done
+
+    if [[ -z "${path}" ]]; then
+        printf "%s\n" "$BOAPATH/${relative_path}.bash"
+        return 1
+    fi
+
+    printf "%s\n" "${path}"
+    return 0
+}
+
+.import_module() {
     # Argument may be of form 'import module' or 'import alias=module'
     # The former is processed like 'import module=module'
     local alias_="$1" module="$1"
@@ -111,32 +190,20 @@ boa::import_module() {
         IFS='=' read -r alias_ module <<<"${module}"
     fi
 
-    # Determine potential file locations
-    # FIXME: BOAPATH should be colon separated list of directories to look in
-    local bash_path="$2" sh_path="$2" relative_path="${module//${BOASEP}//}"
-    if [[ -z "${bash_path}" ]]; then
-        bash_path="${BOAPATH}/${relative_path}.bash"
-        sh_path="${BOAPATH}/${relative_path}.sh"
-    fi
-
-    # Prefer using .bash file, but fallback to .sh if it exists
-    local path="${bash_path}"
-    if ! [[ -r "${bash_path}" ]]; then
-        if ! [[ -r "${sh_path}" ]]; then
-            # Requested module does not exist; emit script block that will report standard Bash error
-            cat <<EOT
+    # Resolve module path
+    local path
+    if ! path=$(.get_module_path "${module}"); then
+        # Requested module does not exist; emit script block that will report standard Bash error
+        cat <<EOT
 set -e
-source '${bash_path}'
+source '${path}'
 EOT
-            return 1
-        else
-            path="${sh_path}"
-        fi
+        return 1
     fi
 
     # Rewrite function names in imported module with requested alias and separator
     local functions
-    readarray -t functions < <(boa::get_function_names "${path}")
+    readarray -t functions < <(.get_function_names "${path}")
     sed -E "${path}" -f <(
         local func prefix
         for func in "${functions[@]}"; do
@@ -147,34 +214,34 @@ EOT
                 prefix="${BASH_REMATCH[0]}"
                 func="${func:${#prefix}}"
                 # FIXME: what else needs escaping?
-                prefix="${prefix//./\.}"
+                prefix="${prefix//./\\.}"
             fi
 
             # sed does not have non-capturing groups
             # Its rather hard with regex to determine  when ".foo" is referring to our function vs embedded in
             # some unrelated piece of text. Current rules:
-            # 1. function name preceded by whitespace, "$(" (as in command substitution) or start-of-line
+            # 1. function name preceded by whitespace, "$(", "<(" (command/process substitution) or start-of-line
             # 2. function name followed by "()" (as in a function definition), whitespace, or end-of-line
-            printf 's/(\\s|\$\(|^)(%s)(%s)(\(\)|\s|$)/\\1%s\\3\\4/g\n' "${prefix}" "${func}" "${alias_}${BOASEP}"
+            printf 's/(\\s|[$<]\(|^)(%s)(%s)(\(\)|\s|$)/\\1%s\\3\\4/g\n' "${prefix}" "${func}" "${alias_}${BOASEP}"
         done
     )
 }
 
-boa::import() {
+.import() {
     for module; do
-        if ! boa::import_module "${module}"; then
+        if ! .import_module "${module}"; then
             return 1
         fi
     done
 
 }
 
-boa::run() {
+.run() {
     local script="$1"
     shift
-    BASH_ENV=<(boa::enable) bash "${script}" "$@"
+    BASH_ENV=<(.enable main) bash "${script}" "$@"
 }
 
 if [[ "$0" == "${BASH_SOURCE[0]}" ]]; then
-    boa::main "$@"
+    .main "$@"
 fi
